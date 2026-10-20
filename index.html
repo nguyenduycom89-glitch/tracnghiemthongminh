@@ -219,21 +219,23 @@ D. Quang hợp
         let questionBank = [];
         let currentCorrectAnswer = "";
 
+        let remainingQuestionIndices = [];
+        let currentQuestionIndex = -1;
+
         function parseQuestions(text) {
-            let parsedList = [];
-            let blocks = text.split(/\n\s*\n/); 
+            const parsedList = [];
+            // Each numbered question starts a block; blank lines are optional.
+            const blocks = text.replace(/\r\n?/g, '\n').split(/(?=^\s*Câu\s+\d+\s*[:.)])/mi);
             blocks.forEach(block => {
-                let lines = block.split('\n').filter(l => l.trim() !== '');
-                if(lines.length >= 6) {
-                    let q = lines[0]; 
-                    let opts = [lines[1], lines[2], lines[3], lines[4]]; 
-                    let ansLine = lines[5].toUpperCase();
-                    let ans = "A";
-                    if(ansLine.includes("B")) ans = "B";
-                    if(ansLine.includes("C")) ans = "C";
-                    if(ansLine.includes("D")) ans = "D";
-                    parsedList.push({ question: q, options: opts, answer: ans });
-                }
+                const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
+                const answerIndex = lines.findIndex(line => /^Đáp\s*án\s*:/i.test(line));
+                const optionStart = lines.findIndex(line => /^A[.)]\s*/i.test(line));
+                if (optionStart < 1 || answerIndex < 0) return;
+                const options = lines.slice(optionStart, answerIndex);
+                const answerMatch = lines[answerIndex].match(/^Đáp\s*án\s*:\s*([A-D])\b/i);
+                if (options.length !== 4 || !answerMatch ||
+                    !options.every((line, index) => new RegExp('^' + 'ABCD'[index] + '[.)]\\s*', 'i').test(line))) return;
+                parsedList.push({ question: lines.slice(0, optionStart).join(' '), options, answer: answerMatch[1].toUpperCase() });
             });
             return parsedList;
         }
@@ -243,17 +245,30 @@ D. Quang hợp
                 alert("Ngân hàng câu hỏi trống! Vui lòng vào Cài đặt để thêm câu hỏi.");
                 return;
             }
-            let randomIndex = Math.floor(Math.random() * questionBank.length);
+            if (remainingQuestionIndices.length === 0) {
+                remainingQuestionIndices = questionBank.map((_, index) => index);
+                for (let i = remainingQuestionIndices.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [remainingQuestionIndices[i], remainingQuestionIndices[j]] = [remainingQuestionIndices[j], remainingQuestionIndices[i]];
+                }
+                const last = remainingQuestionIndices.length - 1;
+                if (last > 0 && remainingQuestionIndices[last] === currentQuestionIndex) {
+                    [remainingQuestionIndices[0], remainingQuestionIndices[last]] = [remainingQuestionIndices[last], remainingQuestionIndices[0]];
+                }
+            }
+            const randomIndex = remainingQuestionIndices.pop();
+            currentQuestionIndex = randomIndex;
             let qData = questionBank[randomIndex];
             currentCorrectAnswer = qData.answer;
 
             document.getElementById('question-display').innerText = qData.question;
             let optionsHtml = '';
+            const escapeHtml = value => value.replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
             
             const labels = ['A', 'B', 'C', 'D'];
             qData.options.forEach((optText, index) => {
                 let label = labels[index];
-                optionsHtml += `<button class="option-btn" onclick="checkAnswer(this, '${label}')"><b>${label}.</b> ${optText.replace(/^[A-D]\.\s*/, '')}</button>`;
+                optionsHtml += `<button class="option-btn" onclick="checkAnswer(this, '${label}')"><b>${label}.</b> ${escapeHtml(optText.replace(/^[A-D][.)]\s*/i, ''))}</button>`;
             });
 
             document.getElementById('options-container').innerHTML = optionsHtml;
@@ -303,6 +318,9 @@ D. Quang hợp
             const rawQuestions = savedQuestions ? savedQuestions : defaultQuestions;
             document.getElementById('questionsDataText').value = rawQuestions;
             questionBank = parseQuestions(rawQuestions);
+            remainingQuestionIndices = [];
+            currentQuestionIndex = -1;
+            document.querySelector('#questionModal .btn-feature').disabled = questionBank.length < 2;
 
             initGameArea();
         }
