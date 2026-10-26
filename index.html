@@ -125,9 +125,13 @@
                     </div>
                     
                     <div class="form-group">
-                        <label>📋 Danh sách Học sinh (Tên | TênFileẢnh):</label>
-                        <p style="font-size: 12px; color: #666; margin-bottom: 5px;">- Chỉ gõ tên: AI tự vẽ ảnh.<br>- Gõ Tên|TênFileẢnh: Dùng ảnh thật.</p>
+                        <label>📋 Danh sách học sinh (mỗi dòng một em):</label>
+                        <p style="font-size: 12px; color: #666; margin-bottom: 5px;">Nhập tên rồi chọn ảnh tại danh sách bên dưới. Vẫn hỗ trợ Tên|ĐườngDẫnẢnh như trước.</p>
                         <textarea id="studentsDataText" placeholder="Tùng Chi|Chi.png&#10;Bảo Ngọc|Bngoc.png"></textarea>
+                        <h3>📷 Ảnh học sinh</h3>
+                        <p style="font-size:12px;color:#555">Chọn JPG, PNG hoặc WebP (tối đa 15 MB/ảnh). Ảnh được lưu ngay trên trình duyệt này; tải lại trang vẫn còn. Không tự đồng bộ sang máy khác. Đổi tên học sinh cần chọn lại ảnh.</p>
+                        <div id="photoStatus" role="status" aria-live="polite"></div>
+                        <div id="studentPhotoRows" style="max-height:260px;overflow:auto"></div>
                     </div>
                 </div>
 
@@ -165,7 +169,7 @@
 
     <script>
         // --- QUẢN LÝ MODAL ---
-        function openSettings() { document.getElementById('settingsModal').style.display = 'flex'; }
+        function openSettings() { document.getElementById('settingsModal').style.display = 'flex'; renderPhotoRows(); }
         function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 
         // --- QUẢN LÝ ÂM THANH (NHẠC NỀN & HIỆU ỨNG) ---
@@ -303,14 +307,109 @@ D. Quang hợp
         const defaultStudents = ["Tùng Chi|Chi.png", "Bảo Ngọc|Bngoc.png", "Bảo Trân|BTran.png", "Gia Bảo", "Minh Khang"];
         let students = [], studentNodes = [], isAnimating = true, isSelecting = false; 
         
+        const photoCache = new Map();
+        const photoDatabase = new Promise((resolve, reject) => {
+            const request = indexedDB.open('fairClassStudentPhotos', 1);
+            request.onupgradeneeded = () => request.result.createObjectStore('photos');
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+        // Handle browsers where persistent storage is unavailable.
+        photoDatabase.catch(() => {});
+        async function photoTransaction(action, key, value) {
+            const db = await photoDatabase;
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction('photos', 'readwrite');
+                const store = tx.objectStore('photos');
+                if (action === 'put') store.put(value, key); else store.delete(key);
+                tx.oncomplete = resolve;
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error || new Error('Không lưu được ảnh'));
+            });
+        }
+        function rosterFromText(text) {
+            const counts = new Map();
+            return text.split('\n').filter(line => line.trim()).map(line => {
+                const [namePart, ...pathParts] = line.split('|');
+                const name = namePart.trim();
+                const occurrence = (counts.get(name) || 0) + 1;
+                counts.set(name, occurrence);
+                return { name, key: JSON.stringify([name, occurrence]), path: pathParts.join('|').trim() };
+            });
+        }
+        function renderPhotoRows() {
+            const container = document.getElementById('studentPhotoRows');
+            container.replaceChildren();
+            rosterFromText(document.getElementById('studentsDataText').value).forEach(student => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #ddd';
+                const preview = document.createElement('img');
+                preview.style.cssText = 'width:48px;height:48px;object-fit:cover;border-radius:50%';
+                preview.alt = 'Ảnh ' + student.name;
+                preview.src = photoCache.get(student.key) || 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect width="48" height="48" fill="#eee"/><text x="24" y="32" text-anchor="middle" font-size="28">👤</text></svg>');
+                const label = document.createElement('span');
+                label.textContent = student.name; label.style.flex = '1';
+                const input = document.createElement('input');
+                input.type = 'file'; input.accept = 'image/jpeg,image/png,image/webp'; input.style.maxWidth = '170px';
+                input.setAttribute('aria-label', 'Tải ảnh cho ' + student.name);
+                const remove = document.createElement('button');
+                remove.textContent = 'Xóa ảnh'; remove.disabled = !photoCache.has(student.key);
+                remove.onclick = async () => {
+                    remove.disabled = true;
+                    try {
+                        await photoTransaction('delete', student.key);
+                        photoCache.delete(student.key); refreshStudentPhotos(); renderPhotoRows();
+                        document.getElementById('photoStatus').textContent = 'Đã xóa ảnh của ' + student.name;
+                    } catch (error) { remove.disabled = false; document.getElementById('photoStatus').textContent = 'Không xóa được ảnh. Vui lòng thử lại.'; }
+                };
+                input.onchange = async () => {
+                    const file = input.files[0]; if (!file) return;
+                    input.disabled = true;
+                    try {
+                        if (!['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 15 * 1024 * 1024) throw new Error('Chọn ảnh JPG, PNG, WebP không quá 15 MB.');
+                        const bitmap = await createImageBitmap(file);
+                        const canvas = document.createElement('canvas');
+                        const scale = Math.min(1, 400 / Math.max(bitmap.width, bitmap.height));
+                        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+                        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+                        const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+                        const data = canvas.toDataURL('image/jpeg', 0.85);
+                        await photoTransaction('put', student.key, data);
+                        photoCache.set(student.key, data); refreshStudentPhotos(); renderPhotoRows();
+                        document.getElementById('photoStatus').textContent = 'Đã lưu ảnh của ' + student.name;
+                    } catch (error) { document.getElementById('photoStatus').textContent = error.message || 'Không lưu được ảnh. Vui lòng thử lại.'; }
+                    finally { input.disabled = false; input.value = ''; }
+                };
+                row.append(preview, label, input, remove); container.append(row);
+            });
+        }
+        function refreshStudentPhotos() {
+            students.forEach((student, index) => {
+                student.img = photoCache.get(student.key) || student.originalImg;
+                const img = studentNodes[index]?.element.querySelector('img');
+                if (img) img.src = student.img;
+            });
+        }
+        document.getElementById('studentsDataText').addEventListener('input', renderPhotoRows);
+        async function restoreStudentPhotos() {
+            try {
+                const db = await photoDatabase;
+                await new Promise((resolve, reject) => {
+                    const tx = db.transaction('photos', 'readonly');
+                    const cursor = tx.objectStore('photos').openCursor();
+                    cursor.onsuccess = () => { const item = cursor.result; if (item) { photoCache.set(item.key, item.value); item.continue(); } };
+                    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+                });
+                refreshStudentPhotos(); renderPhotoRows();
+            } catch (error) { document.getElementById('photoStatus').textContent = 'Trình duyệt không cho lưu ảnh. Hãy cho phép lưu dữ liệu trang web rồi tải lại.'; }
+        }
         function loadSettings() {
             const savedData = localStorage.getItem('classDataNamesOnly');
             const rawData = savedData ? savedData : defaultStudents.join('\n');
-            students = rawData.split('\n').filter(line => line.trim() !== '').map(line => {
-                let parts = line.split('|');
-                let cleanName = parts[0].trim();
-                let imgUrl = parts[1] ? parts[1].trim() : `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(cleanName)}`;
-                return { name: cleanName, img: imgUrl };
+            students = rosterFromText(rawData).map(student => {
+                const originalImg = student.path || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(student.name)}`;
+                return { ...student, originalImg, img: photoCache.get(student.key) || originalImg };
             });
             document.getElementById('studentsDataText').value = rawData;
 
@@ -323,6 +422,7 @@ D. Quang hợp
             document.querySelector('#questionModal .btn-feature').disabled = questionBank.length < 2;
 
             initGameArea();
+            renderPhotoRows();
         }
 
         function saveSettings() {
@@ -494,7 +594,7 @@ D. Quang hợp
             }, 8000); 
         }
 
-        window.onload = loadSettings;
+        window.onload = () => { loadSettings(); restoreStudentPhotos(); };
     </script>
 </body>
 </html>
